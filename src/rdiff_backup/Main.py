@@ -39,7 +39,6 @@ _remote_schema = None
 _force = None
 _select_opts = []
 _select_files = []
-_user_mapping_filename, _group_mapping_filename, _preserve_numerical_ids = None, None, None
 
 # These are global because they are set while we are trying to figure
 # whether to restore or to backup
@@ -258,8 +257,6 @@ def _parse_cmdlineoptions_compat200(arglist):  # noqa: C901
     """
     global _args, _action, _create_full_path, _force, _restore_timestr
     global _remote_schema, _remove_older_than_string
-    global _user_mapping_filename, _group_mapping_filename, \
-        _preserve_numerical_ids
 
     def sel_fl(filename):
         """Helper function for including/excluding filelists below"""
@@ -331,11 +328,6 @@ def _parse_cmdlineoptions_compat200(arglist):  # noqa: C901
         Globals.set("compression", arglist.compression)
         Globals.set("no_compression_regexp_string",
                     os.fsencode(arglist.not_compressed_regexp))
-        _preserve_numerical_ids = arglist.preserve_numerical_ids
-        if arglist.group_mapping_file is not None:
-            _group_mapping_filename = os.fsencode(arglist.group_mapping_file)
-        if arglist.user_mapping_file is not None:
-            _user_mapping_filename = os.fsencode(arglist.user_mapping_file)
     else:
         Globals.set("no_compression_regexp_string",
                     os.fsencode(actions.DEFAULT_NOT_COMPRESSED_REGEXP))
@@ -395,34 +387,6 @@ def _parse_cmdlineoptions_compat200(arglist):  # noqa: C901
         _args = []
     else:
         _args = arglist.locations
-
-
-def _commandline_error(message):
-    Log.FatalError(
-        "%s\nSee the rdiff-backup manual page for more information." % message)
-
-
-def _init_user_group_mapping(destination_conn):
-    """Initialize user and group mapping on destination connection"""
-    global _user_mapping_filename, _group_mapping_filename, \
-        _preserve_numerical_ids
-
-    def get_string_from_file(filename):
-        if not filename:
-            return None
-        rp = rpath.RPath(Globals.local_connection, filename)
-        try:
-            return rp.get_string()
-        except OSError as e:
-            Log.FatalError(
-                "Error '%s' reading mapping file '%s'" % (str(e), filename))
-
-    user_mapping_string = get_string_from_file(_user_mapping_filename)
-    destination_conn.user_group.init_user_mapping(user_mapping_string,
-                                                  _preserve_numerical_ids)
-    group_mapping_string = get_string_from_file(_group_mapping_filename)
-    destination_conn.user_group.init_group_mapping(group_mapping_string,
-                                                   _preserve_numerical_ids)
 
 
 def _take_action(rps):
@@ -501,123 +465,6 @@ def _backup_set_select(rpin):
                                                     *_select_files)
 
 
-def _backup_check_dirs(rpin, rpout):
-    """Make sure in and out dirs exist and are directories"""
-    if rpout.lstat() and not rpout.isdir():
-        if not _force:
-            Log.FatalError("Destination %s exists and is not a "
-                           "directory" % rpout.get_safepath())
-        else:
-            Log("Deleting %s" % rpout.get_safepath(), 3)
-            rpout.delete()
-    if not rpout.lstat():
-        try:
-            if _create_full_path:
-                rpout.makedirs()
-            else:
-                rpout.mkdir()
-        except os.error:
-            Log.FatalError(
-                "Unable to create directory %s" % rpout.get_safepath())
-
-    if not rpin.lstat():
-        Log.FatalError(
-            "Source directory %s does not exist" % rpin.get_safepath())
-    elif not rpin.isdir():
-        Log.FatalError("Source %s is not a directory" % rpin.get_safepath())
-    Globals.rbdir = rpout.append_path(b"rdiff-backup-data")
-
-
-def _check_failed_initial_backup():
-    """Returns true if it looks like initial backup failed."""
-    if Globals.rbdir.lstat():
-        rbdir_files = Globals.rbdir.listdir()
-        mirror_markers = [
-            x for x in rbdir_files if x.startswith(b"current_mirror")
-        ]
-        error_logs = [x for x in rbdir_files if x.startswith(b"error_log")]
-        metadata_mirrors = [
-            x for x in rbdir_files if x.startswith(b"mirror_metadata")
-        ]
-        # If we have no current_mirror marker, and the increments directory
-        # is empty, we most likely have a failed backup.
-        return not mirror_markers and len(error_logs) <= 1 and \
-            len(metadata_mirrors) <= 1
-    return False
-
-
-def _fix_failed_initial_backup():
-    """Clear Globals.rbdir after a failed initial backup"""
-    Log("Found interrupted initial backup. Removing...", 2)
-    rbdir_files = Globals.rbdir.listdir()
-    # Try to delete the increments dir first
-    if b'increments' in rbdir_files:
-        rbdir_files.remove(b'increments')
-        rp = Globals.rbdir.append(b'increments')
-        try:
-            rp.conn.rpath.delete_dir_no_files(rp)
-        except rpath.RPathException:
-            Log("Increments dir contains files.", 4)
-            return
-        except Security.Violation:
-            Log("Server doesn't support resuming.", 2)
-            return
-
-    for file_name in rbdir_files:
-        rp = Globals.rbdir.append_path(file_name)
-        if not rp.isdir():  # Only remove files, not folders
-            rp.delete()
-
-
-def _backup_set_rbdir(rpin, rpout):
-    """Initialize data dir and logging"""
-    global _incdir
-    try:
-        _incdir = Globals.rbdir.append_path(b"increments")
-    except IOError as exc:
-        if exc.errno == errno.EACCES:
-            print("\n")
-            Log.FatalError("Could not begin backup due to\n%s" % exc)
-        else:
-            raise
-
-    assert rpout.lstat(), (
-        "Target backup directory '{rp!s}' must exist.".format(rp=rpout))
-    if rpout.isdir() and not rpout.listdir():  # rpout is empty dir
-        try:
-            rpout.chmod(0o700)  # just make sure permissions aren't too lax
-        except OSError:
-            Log("Cannot change permissions on target directory.", 2)
-    elif not Globals.rbdir.lstat() and not _force:
-        Log.FatalError("""Destination directory
-
-%s
-
-exists, but does not look like a rdiff-backup directory.  Running
-rdiff-backup like this could mess up what is currently in it.  If you
-want to update or overwrite it, run rdiff-backup with the --force
-option.""" % rpout.get_safepath())
-    elif _check_failed_initial_backup():
-        _fix_failed_initial_backup()
-
-    if not Globals.rbdir.lstat():
-        try:
-            Globals.rbdir.mkdir()
-        except (OSError, IOError) as exc:
-            Log.FatalError("""Could not create rdiff-backup directory
-
-%s
-
-due to
-
-%s
-
-Please check that the rdiff-backup user can create files and directories in the
-destination directory: %s""" % (Globals.rbdir.get_safepath(), exc,
-                                rpout.get_safepath()))
-    SetConnections.UpdateGlobal('rbdir', Globals.rbdir)
-
-
 def _backup_warn_if_infinite_recursion(rpin, rpout):
     """Warn user if destination area contained in source area"""
     # Just a few heuristics, we don't have to get every case
@@ -661,15 +508,13 @@ def _backup_final_init(rpout):
     global _prevtime, _incdir
     if Log.verbosity > 0:
         Log.open_logfile(Globals.rbdir.append("backup.log"))
-    _checkdest_if_necessary(rpout)
+    #_checkdest_if_necessary(rpout)
     _prevtime = _backup_get_mirrortime()
     if _prevtime >= Time.curtime:
         Log.FatalError(
             """Time of Last backup is not in the past.  This is probably caused
 by running two backups in less than a second.  Wait a second and try again.""")
     ErrorLog.open(Time.curtimestr, compress=Globals.compression)
-    if not _incdir.lstat():
-        _incdir.mkdir()
 
 
 def _action_restore(src_rp, dest_rp):

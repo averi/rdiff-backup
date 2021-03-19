@@ -459,6 +459,8 @@ class BaseAction:
     def setup(self):
         """
         Prepare the execution of the action.
+
+        Return 0 if everything looked good, else an error code.
         """
         # Set default change ownership flag, umask, relay regexps
         os.umask(0o77)
@@ -471,6 +473,41 @@ class BaseAction:
             conn.Hardlink.initialize_dictionaries()
 
         return 0
+
+    def run(self):
+        """
+        Execute the given action.
+
+        Return 0 if everything looked good, else an error code.
+        """
+        return 0
+
+    def _init_user_group_mapping(dest_conn):
+        """
+        Initialize user and group mapping on destination connection
+        """
+        def get_string_from_file(filename):
+            """
+            Helper function to extract string at once from a given file
+            """
+            if not filename:
+                return None
+            rp = rpath.RPath(Globals.local_connection, os.fsencode(filename))
+            try:
+                return rp.get_string()
+            except OSError as e:
+                Log.FatalError(
+                    "Error '{err!s}' reading mapping file '{file}'".format(
+                        err=e, file=filename))
+
+        user_mapping_string = get_string_from_file(
+            self.values.user_mapping_file)
+        dest_conn.user_group.init_user_mapping(
+            user_mapping_string, self.values.preserve_numerical_ids)
+        group_mapping_string = get_string_from_file(
+            self.values.group_mapping_file)
+        dest_conn.user_group.init_group_mapping(
+            group_mapping_string, self.values.preserve_numerical_ids)
 
 
 def get_action_class():
